@@ -1,0 +1,543 @@
+<style>
+/* Ready to ship v1 (Figma 2028-5): options column hugs the widest pill on desktop; last option is translucent */
+@media (min-width: 768px) {
+	.sp2-marketing-modal_options { width: fit-content; max-width: 100%; }
+	.sp2-marketing-modal_pill { white-space: nowrap; }
+}
+.sp2-marketing-modal_pill.is-ghost { color: #fff; background-color: rgba(255,255,255,.22); border-color: rgba(255,255,255,.45); }
+.sp2-marketing-modal_pill.is-ghost:hover { background-color: rgba(255,255,255,.34); }
+.sp2-marketing-modal_pill.is-ghost.is-selected { color: #18181b; background-color: #fff; border-color: #18181b; }
+/* v3.3 image A/B: both arms are real <picture> elements in the HTML; only the visitor's arm is displayed */
+#sp2Overlay:not(.is-img-nurse) [data-sp-modal-img="nurse"] { display: none !important; }
+#sp2Overlay.is-img-nurse [data-sp-modal-img="silhouette"] { display: none !important; }
+</style>
+<script>
+/* Modal v3.4 (2026-10-17): FOLLOWUP code (Promo, 100% off Progress Check Panel, auto-added) on checkout links once the modal is claimed. v3.3: image A/B silhouette vs nurse (Alex, Figma comment). v3.2: copy lives in the Designer HTML, script only runs behavior. v3.0: always-on "free follow-up test" offer for the $199 SKU (CRO thread, Connor + Alex: old retest SKU, $99 value).
+   The $50 off arm is retired: every page gets the follow-up offer, whatever #sp2AbMarker or Optimize say. */
+(function () {
+	'use strict';
+	var SESSION_KEY = 'sp_welcome_offer_v2';
+	var SUPPRESS_WINDOW = 24 * 60 * 60 * 1000;
+	var BEFORE_YOU_GO_KEY = 'sp_before_you_go';
+	var LOCK_ATTR = 'data-sp-modal-lock';
+	// Every page: 15s of visible time only, no scroll trigger (Alex, 2026-09-27; organic pages too, D-0928).
+	var SCROLL_TRIGGER = 0;
+	var TIME_FALLBACK_MS = 15000;
+	var TEST_PAGE_SCROLL_TRIGGER = 0;
+	var TEST_PAGE_TIME_FALLBACK_MS = 15000;
+	var KLAVIYO_COMPANY_ID = 'XEKaRD';
+	var KLAVIYO_EVENT_METRIC = 'registration_started';
+	var CHECKOUT_URL = '/checkout';
+	// Free follow-up test: set FOLLOWUP_CODE once Promo/Dylan create the checkout code that adds the test at $0.
+	var FOLLOWUP_CODE = 'FOLLOWUP';
+	var CLAIM_KEY = 'sp_followup_claimed';
+	var FOLLOWUP_OFFER_KEY = 'free_followup_test';
+	var FOLLOWUP_DATA_NAME = 'Follow-up Test Modal';
+	// ---- Image A/B (PostHog experiment flag key modal-image-ab, flag stays at 0%: the split happens here, sticky per visitor).
+	var IMG_AB_KEY = 'modal-image-ab';
+	var IMG_AB_STORE = 'sp_modal_img_ab';
+	var IMG_ARMS = ['silhouette', 'nurse'];
+	function imageArm() {
+		var qa = null, v = null;
+		try { qa = new URLSearchParams(window.location.search).get('sp_modal_img'); } catch (e) {}
+		if (IMG_ARMS.indexOf(qa) > -1) { try { localStorage.setItem(IMG_AB_STORE, qa); } catch (e) {} return qa; }
+		try { v = localStorage.getItem(IMG_AB_STORE); } catch (e) {}
+		if (IMG_ARMS.indexOf(v) > -1) return v;
+		v = Math.random() < 0.5 ? 'silhouette' : 'nurse';
+		try { localStorage.setItem(IMG_AB_STORE, v); } catch (e) {}
+		return v;
+	}
+	var IMAGE_VARIANT = imageArm();
+	// Claimed visitors keep the free follow-up test: add code=FOLLOWUP to checkout links that carry no code yet
+	// (the modal CTA routes to the page's buy box first, so the code has to live on every checkout link). Partner codes are never replaced.
+	function claimed() { try { return localStorage.getItem(CLAIM_KEY) === '1'; } catch (e) { return false; } }
+	function withFollowupCode(href) {
+		var u;
+		try { u = new URL(href, window.location.href); } catch (e) { return null; }
+		if (!/(^|\.)superpower\.com$/.test(u.hostname) && u.hostname !== window.location.hostname) return null;
+		if (!/^\/checkout(\/|$)/.test(u.pathname) || u.searchParams.has('code')) return null;
+		u.searchParams.set('code', FOLLOWUP_CODE);
+		return u.toString();
+	}
+	function decorateCheckoutLinks() {
+		if (!claimed()) return;
+		var links = document.querySelectorAll('a[href*="checkout"]');
+		for (var i = 0; i < links.length; i++) { var h = withFollowupCode(links[i].getAttribute('href')); if (h) links[i].setAttribute('href', h); }
+	}
+	document.addEventListener('click', function (e) {
+		if (!claimed()) return;
+		var a = e.target && e.target.closest ? e.target.closest('a[href*="checkout"]') : null;
+		if (!a) return;
+		var h = withFollowupCode(a.getAttribute('href'));
+		if (h) a.setAttribute('href', h);
+	}, true);
+	if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', decorateCheckoutLinks); else decorateCheckoutLinks();
+	window.addEventListener('load', decorateCheckoutLinks);
+	// ---- $50 off A/B (welcome-v2-discount-modal). Webflow Optimize flips #sp2AbMarker text to "discount".
+	var DISCOUNT_CODE = 'WELCOME50';
+	var MARKER_ID = 'sp2AbMarker';
+	var QA_PARAM = 'sp_offer';
+	var OFFER_RETEST = 'retest';
+	var OFFER_DISCOUNT = 'discount';
+	var DISCOUNT_COPY = {
+		intentHead: 'You’ve got $50 off',
+		intentSub: 'To claim, let us know what you’re here for:',
+		formHead: 'Your $50 credit is ready',
+		formSub: 'Enter your email to claim:',
+		submit: 'Unlock Now',
+		fineprint: 'Exclusively for new members. For a limited time.',
+		successHead: 'You’re in',
+		successSub: 'Your credit will be auto-applied at checkout.',
+		start: 'Start testing',
+		perDay: '$0.82/day',
+		dataName: 'Discount Modal'
+	};
+	// The paid-offer embed publishes the page's live offer (Prime Day: own code + copy); the modal follows it.
+	function liveOffer() { return window.__spNewMemberOffer || null; }
+	function discountCode() { var o = liveOffer(); return (o && o.code) || DISCOUNT_CODE; }
+	function discountOfferKey() { var o = liveOffer(); return (o && o.modal && o.modal.offer) || '50_off'; }
+	function discountCopy() {
+		var o = liveOffer(), copy = {};
+		for (var k in DISCOUNT_COPY) copy[k] = DISCOUNT_COPY[k];
+		if (o && o.modal) for (var m in o.modal) if (m !== 'offer' && m !== 'mobile') copy[m] = o.modal[m];
+		var phone = false;
+		try { phone = window.matchMedia('(max-width: 767px)').matches; } catch (e) {}
+		if (phone && o && o.modal && o.modal.mobile) for (var n in o.modal.mobile) copy[n] = o.modal.mobile[n];
+		return copy;
+	}
+	var BLOCKING_SELECTOR = '.byg-overlay.is-visible, [data-byg="overlay"].is-visible, [data-byg="overlay-giannis"].is-visible, .sp3-buybox_modal.is-open';
+	var LOCK_OWNER_SELECTOR = BLOCKING_SELECTOR + ', .sp2-marketing-modal_overlay.is-visible, [class*="overlay"].is-visible, [class*="modal"].is-open, [class*="overlay"].is-open';
+
+	// Step-2 subhead per reason. 100+ is our number; never 60+ (that is Function Health's).
+	var REASON_SUBHEAD = {};   // v3.2: step-2 line is static HTML; add a reason key here only for a per-reason line
+	// Pill labels, both arms (Figma "Ready to ship v1", DQ + Connor 2026-09-19). Slugs stay so dashboards keep history.
+	var PILL_LABELS = {
+		'low-energy': 'Low energy or ongoing fatigue',
+		'weight-metabolism': 'Weight or metabolism concerns',
+		'sleep-mood': 'Sleep, mood, or trouble focusing',
+		'family-history': 'Disease prevention or longevity',
+		'exploring': 'Other, or just exploring'
+	};
+
+	var isTestPage = !!(document.getElementById(MARKER_ID) || document.querySelector('.sp2-ab-marker'));
+	if (isTestPage) { SCROLL_TRIGGER = TEST_PAGE_SCROLL_TRIGGER; TIME_FALLBACK_MS = TEST_PAGE_TIME_FALLBACK_MS; }
+	var overlay = document.getElementById('sp2Overlay');
+	var closeBtn = document.getElementById('sp2Close');
+	var emailInput = document.getElementById('sp2EmailInput');
+	var emailError = document.getElementById('sp2EmailError');
+	var submitBtn = document.getElementById('sp2SubmitBtn');
+	var stateIntent = document.getElementById('sp2StateIntent');
+	var stateForm = document.getElementById('sp2StateForm');
+	var stateSuccess = document.getElementById('sp2StateSuccess');
+	var step2Subhead = document.getElementById('sp2Step2Subhead');
+	var startBtn = document.getElementById('sp2StartBtn');
+	if (!overlay || !closeBtn || !stateIntent || !stateForm || !stateSuccess) return;
+	// the modal ships inside [ACTIVE] Footer, which some pages render twice; bind the controller once
+	if (window.__retestModalBound) return;
+	window.__retestModalBound = true;
+	if (IMAGE_VARIANT === 'nurse') overlay.classList.add('is-img-nurse');
+
+	var pills = stateIntent.querySelectorAll('[data-reason]');
+	for (var pi = 0; pi < pills.length; pi++) {
+		var lbl = PILL_LABELS[pills[pi].getAttribute('data-reason')];
+		if (lbl && (pills[pi].textContent || '').trim() !== lbl) pills[pi].textContent = lbl;
+	}
+	var listId = stateForm.getAttribute('data-klaviyo-list-id') || 'V42E4R';
+	var btnDefault = submitBtn ? submitBtn.textContent : 'Claim my free retest';
+
+	var currentOffer = OFFER_RETEST;
+	var offerLocked = false;   // once the modal has been shown the arm never changes
+	var discountApplied = false;
+	function markerText() {
+		var nodes = document.querySelectorAll('#' + MARKER_ID + ', .sp2-ab-marker');
+		for (var i = 0; i < nodes.length; i++) {
+			if (nodes[i].closest && nodes[i].closest('[data-wf-hidden-variation]')) continue;
+			return (nodes[i].textContent || '').trim().toLowerCase();
+		}
+		return '';
+	}
+	function resolveOffer() {
+		// v3.0: the $50 off arm is retired; the follow-up test offer runs everywhere
+		return OFFER_RETEST;
+	}
+	function refreshOffer() {
+		if (offerLocked) return currentOffer;
+		currentOffer = resolveOffer();
+		return currentOffer;
+	}
+	function isDiscount() { return currentOffer === OFFER_DISCOUNT; }
+	function checkoutHref() { return FOLLOWUP_CODE ? CHECKOUT_URL + '?code=' + FOLLOWUP_CODE : CHECKOUT_URL; }
+	// UTM: the sitewide utmPassthrough script decorates the anchor on click (capture phase) with the visitor's
+	// acquisition params. We never overwrite those; we only add modal attribution where nothing is set.
+	function withModalUtm(href) {
+		var u;
+		try { u = new URL(href, window.location.href); } catch (e) { return href; }
+		var arm = isDiscount() ? 'discount_modal' : 'retest_modal';
+		// carry the visitor's own acquisition params (URL first, then the sp_utm cookie the passthrough script writes)
+		var KEYS = ['utm_source','utm_medium','utm_campaign','utm_term','utm_content','utm_id','gclid','gbraid','wbraid','fbclid','msclkid','ttclid'];
+		var q = null, cookieUtm = {};
+		try { q = new URLSearchParams(window.location.search); } catch (e) {}
+		try { var m = document.cookie.match(/(?:^|; )sp_utm=([^;]*)/); if (m) cookieUtm = JSON.parse(decodeURIComponent(m[1])) || {}; } catch (e) {}
+		for (var i = 0; i < KEYS.length; i++) {
+			if (u.searchParams.has(KEYS[i])) continue;
+			var v = q ? q.get(KEYS[i]) : null;
+			if (v == null) v = cookieUtm[KEYS[i]];
+			if (v != null && String(v).trim()) u.searchParams.set(KEYS[i], String(v).trim().slice(0, 512));
+		}
+		if (!u.searchParams.has('utm_source')) {
+			u.searchParams.set('utm_source', 'superpower.com');
+			u.searchParams.set('utm_medium', 'onsite_modal');
+			u.searchParams.set('utm_campaign', 'always-on-modal');
+		}
+		if (!u.searchParams.has('utm_content')) u.searchParams.set('utm_content', arm);
+		return u.pathname + u.search + u.hash;
+	}
+	function setText(el, text) { if (el && text != null) el.textContent = text; }
+	// Discount arm: text-only swap on the live states. Control arm never touches the DOM.
+	function applyDiscountCopy() {
+		if (discountApplied) return;
+		discountApplied = true;
+		var DISCOUNT_COPY = discountCopy();
+		setText(stateIntent.querySelector('.is-modal-hero'), DISCOUNT_COPY.intentHead);
+		setText(stateIntent.querySelector('.sp2-marketing-modal_subhead'), DISCOUNT_COPY.intentSub);
+		setText(stateForm.querySelector('.is-modal-hero'), DISCOUNT_COPY.formHead);
+		setText(step2Subhead, DISCOUNT_COPY.formSub);
+		if (submitBtn) { submitBtn.textContent = DISCOUNT_COPY.submit; btnDefault = DISCOUNT_COPY.submit; }
+		var formWrap = stateForm.querySelector('.sp2-marketing-modal_form');
+		if (formWrap && !stateForm.querySelector('.sp2-marketing-modal_fineprint')) {
+			var fp = document.createElement('p');
+			fp.className = 'sp2-marketing-modal_fineprint';
+			fp.textContent = DISCOUNT_COPY.fineprint;
+			formWrap.parentNode.insertBefore(fp, formWrap.nextSibling);
+		}
+		if (DISCOUNT_COPY.badge) {
+			var badges = overlay.querySelectorAll('.sp2-marketing-modal_badge .sp2-mm-flush');
+			for (var b = 0; b < badges.length; b++) badges[b].textContent = DISCOUNT_COPY.badge;
+		}
+		var successHeading = stateSuccess.querySelector('.sp2-marketing-modal_success-heading');
+		if (successHeading && DISCOUNT_COPY.successWas) {
+			// "$349 $199/yr", the old price struck and dimmed as drawn
+			var was = document.createElement('span');
+			was.style.cssText = 'text-decoration:line-through;color:rgba(255,255,255,.48);font-size:.9em';
+			was.textContent = DISCOUNT_COPY.successWas;
+			successHeading.textContent = '';
+			successHeading.appendChild(was);
+			successHeading.appendChild(document.createTextNode(' ' + DISCOUNT_COPY.successNow));
+		} else setText(successHeading, DISCOUNT_COPY.successHead);
+		setText(stateSuccess.querySelector('.sp2-marketing-modal_subhead'), DISCOUNT_COPY.successSub);
+		if (startBtn) { startBtn.textContent = DISCOUNT_COPY.start; startBtn.setAttribute('href', checkoutHref()); }
+		var facts = overlay.querySelectorAll('.sp2-marketing-modal_fact p');
+		for (var i = 0; i < facts.length; i++) {
+			if (/^\$\d+(\.\d+)?\/day$/.test((facts[i].textContent || '').trim())) facts[i].textContent = DISCOUNT_COPY.perDay;
+		}
+		stateForm.setAttribute('data-name', DISCOUNT_COPY.dataName);
+	}
+	// v3.2: the follow-up offer copy lives in the Designer HTML (Modal Marketing component), not in this script
+	if (startBtn) startBtn.setAttribute('href', checkoutHref());
+	// Optimize applies its variation client-side after our embed runs; follow the marker until it settles.
+	refreshOffer();
+	(function watchMarker() {
+		if (!window.MutationObserver) return;
+		var marker = document.getElementById(MARKER_ID) || document.querySelector('.sp2-ab-marker');
+		if (!marker) return;
+		var obs = new MutationObserver(function () { refreshOffer(); });
+		obs.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['data-wf-hidden-variation'] });
+		setTimeout(function () { obs.disconnect(); }, 8000);
+	})();
+
+	var hasBeenShown = false;
+	var hasSubmitted = false;
+	var selectedReason = null;
+	var selectedLabel = null;
+	var finePointer = false;
+	try { finePointer = window.matchMedia('(hover: hover) and (pointer: fine)').matches; } catch (e) {}
+
+	function recentlyShown() {
+		try {
+			var t = parseInt(localStorage.getItem(SESSION_KEY), 10);
+			if (t > 0 && Date.now() - t < SUPPRESS_WINDOW) return true;
+		} catch (e) {}
+		try { if (sessionStorage.getItem(SESSION_KEY) === '1') return true; } catch (e) {}
+		return false;
+	}
+	function markShown() {
+		try { localStorage.setItem(SESSION_KEY, String(Date.now())); } catch (e) {}
+		try { sessionStorage.setItem(SESSION_KEY, '1'); } catch (e) {}
+	}
+	function beforeYouGoShownThisSession() {
+		try { return sessionStorage.getItem(BEFORE_YOU_GO_KEY) === '1'; } catch (e) { return false; }
+	}
+	function track(name, extra) {
+		if (!window.posthog) return;
+		var props = { source: 'welcome_offer_popup', modal_name: stateForm.getAttribute('data-name') || '', list_id: listId, offer: currentOffer, image_variant: IMAGE_VARIANT };
+		if (isDiscount()) { props.promo_code = discountCode(); props.modal_offer = discountOfferKey(); }
+		if (extra) { for (var k in extra) props[k] = extra[k]; }
+		try { posthog.capture(name, props); } catch (e) {}
+	}
+	function blockingModalOpen() {
+		try { return !!document.querySelector(BLOCKING_SELECTOR); } catch (e) { return false; }
+	}
+	function someoneOwnsLock() {
+		try {
+			if (window.__scrollLocked === true) return true;
+			return !!document.querySelector(LOCK_OWNER_SELECTOR);
+		} catch (e) { return true; }
+	}
+	function lockScroll() {
+		var de = document.documentElement;
+		if (de.getAttribute(LOCK_ATTR) === '1') return;
+		de.setAttribute(LOCK_ATTR, '1');
+		de.style.overflow = 'hidden';
+		if (document.body) document.body.style.overflow = 'hidden';
+	}
+	function unlockScroll() {
+		var de = document.documentElement;
+		if (de.getAttribute(LOCK_ATTR) !== '1') return;
+		de.removeAttribute(LOCK_ATTR);
+		de.style.overflow = '';
+		if (document.body) document.body.style.overflow = '';
+	}
+	function auditLock() {
+		if (overlay.classList.contains('is-visible')) { lockScroll(); return; }
+		if (document.documentElement.getAttribute(LOCK_ATTR) === '1') unlockScroll();
+	}
+
+	// blur + opacity cross-fade between two state panels
+	function transition(fromEl, toEl) {
+		if (!toEl || fromEl === toEl) return;
+		if (!fromEl) {
+			toEl.classList.add('is-active', 'is-entering');
+			toEl.addEventListener('animationend', function h() { toEl.removeEventListener('animationend', h); toEl.classList.remove('is-entering'); });
+			return;
+		}
+		fromEl.classList.remove('is-entering');
+		fromEl.classList.add('is-exiting');
+		fromEl.addEventListener('animationend', function onExit() {
+			fromEl.removeEventListener('animationend', onExit);
+			fromEl.classList.remove('is-active', 'is-exiting');
+			toEl.classList.add('is-active', 'is-entering');
+			toEl.addEventListener('animationend', function onEnter() { toEl.removeEventListener('animationend', onEnter); toEl.classList.remove('is-entering'); });
+		});
+	}
+	function activePanel() {
+		return stateIntent.classList.contains('is-active') ? stateIntent
+			: stateForm.classList.contains('is-active') ? stateForm
+			: stateSuccess.classList.contains('is-active') ? stateSuccess : null;
+	}
+
+	function chooseReason(pill) {
+		selectedReason = pill.getAttribute('data-reason');
+		selectedLabel = (pill.textContent || '').trim();
+		for (var i = 0; i < pills.length; i++) pills[i].classList.remove('is-selected');
+		pill.classList.add('is-selected');
+		if (step2Subhead && !isDiscount() && REASON_SUBHEAD[selectedReason]) step2Subhead.textContent = REASON_SUBHEAD[selectedReason];
+		track('marketing_modal_reason_selected', { reason: selectedReason, reason_label: selectedLabel });
+		transition(stateIntent, stateForm);
+		if (finePointer && emailInput) { try { setTimeout(function () { emailInput.focus(); }, 140); } catch (e) {} }
+	}
+	for (var i = 0; i < pills.length; i++) {
+		(function (p) { p.addEventListener('click', function (e) { e.preventDefault(); chooseReason(p); }); })(pills[i]);
+	}
+
+	function show(trigger) {
+		if (hasBeenShown) return;
+		if (beforeYouGoShownThisSession()) return;
+		if (blockingModalOpen()) return;
+		refreshOffer();
+		offerLocked = true;
+		if (isDiscount()) applyDiscountCopy();
+		hasBeenShown = true;
+		markShown();
+		overlay.classList.add('is-visible');
+		lockScroll();
+		stopTimeFallback();
+		try {
+			if (window.posthog) {
+				var reg = {}; reg['$feature/' + IMG_AB_KEY] = IMAGE_VARIANT;
+				posthog.register(reg);
+				posthog.capture('webflow_optimize_exposure', { webflow_optimize_experiment_key: IMG_AB_KEY, variant: IMAGE_VARIANT, surface: 'webflow' });
+			}
+		} catch (e) {}
+		track('marketing_modal_shown', { trigger: trigger || 'scroll_depth', scroll_depth: Math.round(scrollDepth() * 100), seconds_on_page: Math.round(visibleMs / 1000) });
+	}
+	function hide() {
+		var wasVisible = overlay.classList.contains('is-visible');
+		overlay.classList.remove('is-visible');
+		unlockScroll();
+		if (wasVisible) track('marketing_modal_dismissed', { submitted: hasSubmitted, reason: selectedReason });
+	}
+	closeBtn.addEventListener('click', hide);
+	overlay.addEventListener('click', function (e) { if (e.target === overlay) hide(); });
+	document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && overlay.classList.contains('is-visible')) hide(); });
+	if (startBtn) startBtn.addEventListener('click', function (e) {
+		e.preventDefault();
+		if (!startBtn.getAttribute('href') || startBtn.getAttribute('href') === '#') startBtn.setAttribute('href', checkoutHref());
+		try { if (window.spUtmDecorate) window.spUtmDecorate(startBtn); } catch (err) {}
+		var href = withModalUtm(startBtn.getAttribute('href'));
+		track('marketing_modal_checkout_click', { href: href });
+		window.location.href = href;
+	});
+
+	// ---- Klaviyo ----
+	function setLoading(loading) {
+		if (!submitBtn) return;
+		submitBtn.disabled = loading;
+		submitBtn.textContent = loading ? 'Sending…' : btnDefault;
+		submitBtn.style.opacity = loading ? '0.6' : '';
+	}
+	function hideFormError() {
+		if (emailInput) emailInput.classList.remove('has-error');
+		if (emailError) emailError.classList.remove('is-visible');
+	}
+	function showFormError(msg) {
+		if (emailInput) emailInput.classList.add('has-error');
+		if (emailError) { emailError.textContent = msg; emailError.classList.add('is-visible'); }
+	}
+	if (emailInput) emailInput.addEventListener('input', hideFormError);
+
+	function subscribeEmail(email, params) {
+		return fetch('https://a.klaviyo.com/client/subscriptions/?company_id=' + KLAVIYO_COMPANY_ID, {
+			method: 'POST',
+			headers: { 'revision': '2023-08-15', 'content-type': 'application/json' },
+			body: JSON.stringify({ data: { type: 'subscription', attributes: {
+				custom_source: stateForm.getAttribute('data-name') || FOLLOWUP_DATA_NAME,
+				profile: { data: { type: 'profile', attributes: {
+					email: email,
+					properties: {
+						modal_reason: selectedReason,
+						modal_reason_label: selectedLabel,
+						modal_image_variant: IMAGE_VARIANT,
+						modal_offer: isDiscount() ? discountOfferKey() : FOLLOWUP_OFFER_KEY,
+						promo_code: isDiscount() ? discountCode() : null,
+						source_url: window.location.href,
+						source_page_path: window.location.pathname,
+						source_referrer: document.referrer || null,
+						utm_source: params.get('utm_source'),
+						utm_medium: params.get('utm_medium'),
+						utm_campaign: params.get('utm_campaign'),
+						signup_device: /Mobi|Android/i.test(navigator.userAgent) ? 'mobile' : 'desktop'
+					}
+				} } }
+			}, relationships: { list: { data: { type: 'list', id: listId } } } } })
+		}).then(function (res) { if (!res.ok) return res.json().then(function (err) { return Promise.reject(err); }); });
+	}
+
+	// Will's flow trigger: one metric, branches on `reason`. Client events endpoint auto-creates the metric.
+	function trackKlaviyoEvent(email) {
+		try {
+			fetch('https://a.klaviyo.com/client/events/?company_id=' + KLAVIYO_COMPANY_ID, {
+				method: 'POST',
+				headers: { 'revision': '2023-08-15', 'content-type': 'application/json' },
+				body: JSON.stringify({ data: { type: 'event', attributes: {
+					metric: { data: { type: 'metric', attributes: { name: KLAVIYO_EVENT_METRIC } } },
+					properties: { reason: selectedReason, reason_label: selectedLabel, image_variant: IMAGE_VARIANT, source: isDiscount() ? 'discount_modal' : 'retest_modal', offer: isDiscount() ? discountOfferKey() : FOLLOWUP_OFFER_KEY, promo_code: isDiscount() ? discountCode() : null },
+					profile: { data: { type: 'profile', attributes: { email: email } } }
+				} } })
+			});
+		} catch (e) {}
+	}
+
+	function handleSubmit() {
+		if (!emailInput) return;
+		hideFormError();
+		var email = emailInput.value.trim();
+		if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showFormError('Please enter a valid email address'); emailInput.focus(); return; }
+		setLoading(true);
+		var params = new URLSearchParams(window.location.search);
+		subscribeEmail(email, params)
+			.then(function () {
+				setLoading(false);
+				hasSubmitted = true;
+				try { localStorage.setItem(CLAIM_KEY, '1'); } catch (e) {}
+				decorateCheckoutLinks();
+				trackKlaviyoEvent(email);
+				track('registration_started', { reason: selectedReason });
+				transition(stateForm, stateSuccess);
+			})
+			.catch(function (err) { console.error('retest modal klaviyo error:', err); setLoading(false); showFormError('Something went wrong. Please try again.'); });
+	}
+	if (submitBtn) submitBtn.addEventListener('click', handleSubmit);
+	if (emailInput) emailInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); handleSubmit(); } });
+
+	function scrollDepth() {
+		var de = document.documentElement;
+		var docH = Math.max(de.scrollHeight || 0, document.body ? document.body.scrollHeight || 0 : 0);
+		var vh = window.innerHeight || de.clientHeight || 0;
+		if (!docH || !vh || docH - vh < 100) return 0;
+		return ((window.pageYOffset || de.scrollTop || 0) + vh) / docH;
+	}
+	var ticking = false;
+	function onScroll() {
+		if (ticking) return;
+		ticking = true;
+		requestAnimationFrame(function () {
+			ticking = false;
+			if (hasBeenShown) { detachScroll(); return; }
+			// After a buy-box routing jump (sp3-cta-route) the depth was crossed by us, not the visitor.
+			if (document.documentElement.hasAttribute('data-sp-offer-routed-at')) return;
+			if (SCROLL_TRIGGER && scrollDepth() >= SCROLL_TRIGGER) { detachScroll(); show('scroll_depth'); }
+		});
+	}
+	function detachScroll() { window.removeEventListener('scroll', onScroll); }
+	// Time-on-page fallback: counts only while the tab is visible; retries while another overlay blocks the show.
+	var visibleMs = 0;
+	var lastTick = Date.now();
+	var timeFallback = null;
+	function stopTimeFallback() { if (timeFallback) { clearInterval(timeFallback); timeFallback = null; } }
+	function startTimeFallback() {
+		stopTimeFallback();
+		if (!TIME_FALLBACK_MS) return;
+		lastTick = Date.now();
+		timeFallback = setInterval(function () {
+			var now = Date.now();
+			if (document.visibilityState !== 'hidden') visibleMs += now - lastTick;
+			lastTick = now;
+			if (hasBeenShown) { stopTimeFallback(); return; }
+			if (visibleMs >= TIME_FALLBACK_MS) { detachScroll(); show('time_on_page'); }
+			if (visibleMs >= TIME_FALLBACK_MS * 6) stopTimeFallback();
+		}, 1000);
+	}
+
+	// debug handles
+	window.__spModal = {
+		config: function () { return { testPage: isTestPage, scrollTrigger: SCROLL_TRIGGER, timeFallbackMs: TIME_FALLBACK_MS }; },
+		show: function () { hasBeenShown = false; refreshOffer(); offerLocked = true; if (isDiscount()) applyDiscountCopy(); overlay.classList.add('is-visible'); lockScroll(); },
+		offer: function () { return currentOffer; },
+		image: function () { return IMAGE_VARIANT; },
+		hide: hide,
+		reset: function () {
+			try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+			try { sessionStorage.removeItem(SESSION_KEY); } catch (e) {}
+			hasBeenShown = false; hide();
+			visibleMs = 0;
+			window.addEventListener('scroll', onScroll, { passive: true });
+			startTimeFallback();
+		},
+		depth: scrollDepth
+	};
+
+	window.addEventListener('pageshow', auditLock);
+	window.addEventListener('popstate', auditLock);
+	document.addEventListener('visibilitychange', auditLock);
+	window.addEventListener('focus', auditLock);
+	setInterval(auditLock, 1000);
+	auditLock();
+
+	var strayChecks = 0;
+	var strayWatch = setInterval(function () {
+		strayChecks++;
+		if (strayChecks > 120) { clearInterval(strayWatch); return; }
+		var de = document.documentElement;
+		if (de.getAttribute(LOCK_ATTR) === '1') return;
+		if (de.style.overflow === 'hidden' && !someoneOwnsLock()) {
+			de.style.overflow = '';
+			if (document.body) document.body.style.overflow = '';
+		}
+	}, 1000);
+
+	if (recentlyShown()) return;
+	if (beforeYouGoShownThisSession()) return;
+	window.addEventListener('scroll', onScroll, { passive: true });
+	startTimeFallback();
+})();
+</script>

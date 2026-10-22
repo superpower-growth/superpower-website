@@ -1,0 +1,437 @@
+<script>
+/* Paid offer v1.8.1: Prime Day sale ENDED by publish ($199 switch ships with this code, whatever the clock says): the $199 base price (no strike, no pill, no code). The $299 New Member Offer is off (NMO_ON) */
+(function () {
+	'use strict';
+	var NMO = {
+		endsAt: '2026-10-30T23:59:59-07:00',
+		// the bar shows the pill until here, then the countdown for the last week (Alex, 2026-10-01, D-0932)
+		timerFrom: '2026-10-23T23:59:59-07:00',
+		code: 'WELCOME50',
+		was: '$349',
+		now: '$299',
+		perDayWas: '$0.96',
+		perDayNow: '$0.82',
+		pill: 'New members: $50 off',
+		barPill: '$50 off',
+		barSub: 'Exclusive new member discount'
+	};
+	// Prime Day (Alex, 2026-10-06): $199 until endsAt, then the New Member Offer above again with no publish.
+	// Live on prod since 10-06 (BASELINE26 verified at checkout). Extended to Thu 10/15 11:59 PM PT (Alex, 2026-10-08).
+	var PRIME = {
+		// $199 switch: ended = true means this code only ever shows the $199 base price. It goes live with the switch publish.
+		ended: true,
+		live: true,
+		startsAt: '2026-10-06T00:00:00-07:00',
+		endsAt: '2026-10-16T00:00:00-07:00',
+		excludedPaths: [],
+		// both homepage A/B arms and /welcome (no marker) get the sale
+		forcePaths: ['/', '/welcome'],
+		code: 'BASELINE26',
+		now: '$199',
+		perDayNow: '$0.55',
+		pill: 'Limited time: $150 off',
+		barPill: '$150 off',
+		barSub: 'Limited time offer',
+		// modal copy: Figma 1SsiG9YladWmn8Xg0Z0KMl, Offer modal set, Discount row 832:1752-832:1918
+		modal: {
+			badge: 'Limited time offer',
+			intentHead: 'Get $150 off',
+			intentSub: 'To claim, let us know what you’re here for:',
+			formHead: 'Your $150 credit is ready',
+			formSub: 'Enter your email to claim:',
+			submit: 'Claim now',
+			fineprint: 'Get your Superpower membership for $199',
+			successWas: '$349',
+			successNow: '$199/yr',
+			successSub: 'Your credit will be auto-applied at checkout.',
+			start: 'Get my baseline',
+			perDay: '$0.55/day',
+			offer: 'prime_199',
+			mobile: {
+				intentHead: 'You’ve got $150 off',
+				fineprint: 'Exclusively for new members. For a limited time.',
+				successSub: 'Your credit is auto-applied at checkout.'
+			}
+		}
+	};
+	// $199 membership switch (Thu 10/15 11:59 PM PT): after the sale the base price is $199, nothing struck, no code.
+	var NMO_ON = false;
+	var BASE = {
+		now: '$199',
+		perDay: '$0.55',
+		barSub: '100+ biomarkers. One blood draw.',
+		codes: ['WELCOME50', 'BASELINE26'],
+		oldPrices: ['$349', '$299'],
+		oldPerDay: ['$0.96', '$0.82']
+	};
+	var OFFER = NMO;
+	// Pages with their own bonus-test offer keep it until Alex confirms COGS.
+	var EXCLUDED_PATHS = ['/landing/heart-panel', '/dr-leigh-connealy'];
+
+	var synced = [];
+	var started = false;
+	var SKIP = 'script,style,noscript,template,s,del,strike,.sp3-buybox_price-was,.banner-bottom_price-was,[data-sp-price-skip]';
+	// A comparison names a price right after the word ("the regular $349", "was $349"), same rule as /lp.
+	var COMPARE = /\b(instead of|normally|regularly|regular(?: price)?|reg\.|usually|retail|down from|originally|was)\b[^$]{0,20}\$\d/i;
+
+	if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
+	else boot();
+
+	function boot() {
+		if (EXCLUDED_PATHS.indexOf(window.location.pathname.replace(/\/$/, '')) !== -1) return;
+		if (!NMO_ON && !primeActive()) { basePage(); return; }
+		if (markerText() === 'discount' || (primeActive() && PRIME.forcePaths.indexOf(currentPath()) !== -1)) { start(); return; }
+		// A/B pages (homepage): Optimize flips the marker client-side, follow it for a few seconds
+		if (!window.MutationObserver || !document.getElementById('sp2AbMarker')) return;
+		var obs = new MutationObserver(function () {
+			if (markerText() !== 'discount') return;
+			obs.disconnect();
+			start();
+		});
+		obs.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['data-wf-hidden-variation'] });
+		setTimeout(function () { obs.disconnect(); }, 10000);
+	}
+
+	function currentPath() { return window.location.pathname.replace(/\/$/, '') || '/'; }
+	function primeActive() {
+		if (PRIME.ended) return false;
+		var now = Date.now();
+		if (!(PRIME.live || /\.webflow\.io$/.test(window.location.hostname))) return false;
+		if (PRIME.excludedPaths.indexOf(currentPath()) !== -1) return false;
+		return Date.parse(PRIME.startsAt) <= now && now < Date.parse(PRIME.endsAt);
+	}
+
+	function start() {
+		if (started) return;
+		started = true;
+		var deadline = NMO_ON ? Date.parse(NMO.endsAt) : Date.parse(PRIME.endsAt);
+		if (!(Date.now() < deadline)) { if (NMO_ON) hideNativeBar(); else basePage(); return; }
+		if (primeActive()) {
+			OFFER = {};
+			for (var k in NMO) OFFER[k] = NMO[k];
+			for (var p in PRIME) if (p !== 'live' && p !== 'startsAt' && p !== 'endsAt' && p !== 'excludedPaths' && p !== 'forcePaths') OFFER[p] = PRIME[p];
+			OFFER.prime = true;
+			OFFER.from = NMO;
+		}
+		window.__spNewMemberOffer = OFFER;
+		applyBuyBox();
+		syncStrayPrices();
+		addCodeToCheckoutLinks();
+		prepareNativeBar(deadline);
+	}
+
+	function markerText() {
+		var nodes = document.querySelectorAll('#sp2AbMarker, .sp2-ab-marker');
+		for (var i = 0; i < nodes.length; i++) {
+			if (nodes[i].closest && nodes[i].closest('[data-wf-hidden-variation]')) continue;
+			return (nodes[i].textContent || '').trim().toLowerCase();
+		}
+		return '';
+	}
+
+	function applyBuyBox() {
+		var prices = document.querySelectorAll('.sp3-buybox_price');
+		for (var i = 0; i < prices.length; i++) {
+			var price = prices[i];
+			if (price.getAttribute('data-sp-nmo') || (price.textContent || '').trim() !== OFFER.was) continue;
+			price.setAttribute('data-sp-nmo', '1');
+			price.textContent = OFFER.now;
+			var was = document.createElement('p');
+			was.className = 'sp3-buybox_price-was';
+			was.textContent = OFFER.was;
+			price.parentNode.insertBefore(was, price.nextSibling);
+			var row = price.closest('.sp3-buybox_price-row');
+			if (row && !row.querySelector('.sp3-buybox_pill')) {
+				var pill = document.createElement('p');
+				pill.className = 'sp3-buybox_pill';
+				pill.textContent = OFFER.pill;
+				row.appendChild(pill);
+			}
+		}
+		// the per-day line is a text node after the icon: "$0.96 / day"
+		var metas = document.querySelectorAll('.sp3-buybox_meta-item');
+		for (var j = 0; j < metas.length; j++) {
+			var nodes = metas[j].childNodes;
+			for (var k = 0; k < nodes.length; k++) {
+				if (nodes[k].nodeType === 3 && nodes[k].nodeValue.indexOf(OFFER.perDayWas) !== -1) {
+					synced.push([nodes[k], nodes[k].nodeValue]);
+					nodes[k].nodeValue = nodes[k].nodeValue.replace(OFFER.perDayWas, OFFER.perDayNow);
+				}
+			}
+		}
+	}
+
+	// One price per page: hero copy, comparison tables and test sections were written at $349.
+	// Struck prices and sentences that compare the two are left alone.
+	function struck(el) {
+		for (var e = el; e && e !== document.body; e = e.parentElement) {
+			if ((window.getComputedStyle(e).textDecorationLine || '').indexOf('line-through') !== -1) return true;
+		}
+		return false;
+	}
+	function priceRe(price) { return new RegExp('\\' + price + '(?![\\d,])', 'g'); }
+	// Prime Day: copy written for the $299 offer ("$299", "$0.82", "$50 off", "Save $50") moves to the sale too.
+	function primeText(v) {
+		if (!OFFER.prime) return v;
+		return v.replace(priceRe(NMO.now), function () { return OFFER.now; }).split(NMO.perDayNow).join(OFFER.perDayNow)
+			.replace(/\$50(?![\d,.])(?=\s*(?:off|credit)\b)/gi, function () { return '$150'; })
+			.replace(/\b(save )\$50(?![\d,.])/gi, function (m, save) { return save + '$150'; });
+	}
+	function hasPrimeText(v) {
+		return OFFER.prime && (priceRe(NMO.now).test(v) || v.indexOf(NMO.perDayNow) !== -1 || /\$50(?![\d,.])/.test(v));
+	}
+	function syncStrayPrices() {
+		var wasRe = priceRe(OFFER.was);
+		var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+		var node;
+		while ((node = walker.nextNode())) {
+			var v = node.nodeValue || '';
+			var hasWas = v.indexOf(OFFER.was) !== -1 || v.indexOf(OFFER.perDayWas) !== -1;
+			if (!hasWas && !hasPrimeText(v)) continue;
+			if (v.indexOf(OFFER.now) !== -1 || COMPARE.test(v)) continue;
+			var el = node.parentElement;
+			if (!el || el.closest(SKIP) || struck(el)) continue;
+			var next = primeText(hasWas ? v.replace(wasRe, function () { return OFFER.now; }).split(OFFER.perDayWas).join(OFFER.perDayNow) : v);
+			if (next === v) continue;
+			synced.push([node, v]);
+			node.nodeValue = next;
+		}
+	}
+	function restorePage() {
+		for (var i = 0; i < synced.length; i++) synced[i][0].nodeValue = synced[i][1];
+		synced = [];
+		var prices = document.querySelectorAll('.sp3-buybox_price[data-sp-nmo]');
+		for (var j = 0; j < prices.length; j++) {
+			prices[j].textContent = OFFER.was;
+			prices[j].removeAttribute('data-sp-nmo');
+			var row = prices[j].closest('.sp3-buybox_price-row') || prices[j].parentNode;
+			var extra = row.querySelectorAll('.sp3-buybox_price-was, .sp3-buybox_pill');
+			for (var k = 0; k < extra.length; k++) extra[k].parentNode.removeChild(extra[k]);
+		}
+	}
+	function endOffer() {
+		hideNativeBar();
+		restorePage();
+		var links = document.querySelectorAll('a[href*="code=' + OFFER.code + '"], a[href*="code=' + NMO.code + '"]');
+		for (var m = 0; m < links.length; m++) {
+			try {
+				var u = new URL(links[m].getAttribute('href'), window.location.href);
+				u.searchParams.delete('code');
+				links[m].setAttribute('href', u.origin === window.location.origin ? u.pathname + u.search + u.hash : u.toString());
+			} catch (e) {}
+		}
+	}
+
+	// Prime Day ends while the page is open: back to the $299 offer in place.
+	function endPrime() {
+		restorePage();
+		var links = document.querySelectorAll('a[href*="code=' + OFFER.code + '"]');
+		OFFER = NMO;
+		window.__spNewMemberOffer = OFFER;
+		for (var i = 0; i < links.length; i++) {
+			try {
+				var u = new URL(links[i].getAttribute('href'), window.location.href);
+				u.searchParams.set('code', NMO.code);
+				links[i].setAttribute('href', u.origin === window.location.origin ? u.pathname + u.search + u.hash : u.toString());
+			} catch (e) {}
+		}
+		applyBuyBox();
+		syncStrayPrices();
+		var pills = document.querySelectorAll('.banner-bottom_nmo-pill');
+		for (var p = 0; p < pills.length; p++) pills[p].textContent = NMO.barPill;
+		var subs = document.querySelectorAll('.banner-bottom_nmo-sub');
+		for (var b = 0; b < subs.length; b++) subs[b].textContent = NMO.barSub;
+	}
+
+	function withCode(href) {
+		try {
+			var u = new URL(href, window.location.href);
+			if (!/\/checkout(\/|$)/.test(u.pathname)) return href;
+			var code = u.searchParams.get('code');
+			if (code && !(OFFER.prime && code.toUpperCase() === NMO.code)) return href;
+			u.searchParams.set('code', OFFER.code);
+			return u.origin === window.location.origin ? u.pathname + u.search + u.hash : u.toString();
+		} catch (e) { return href; }
+	}
+	function addCodeToCheckoutLinks() {
+		var links = document.querySelectorAll('a[href*="checkout"]');
+		for (var i = 0; i < links.length; i++) {
+			var href = links[i].getAttribute('href') || '';
+			var next = withCode(href);
+			if (next !== href) links[i].setAttribute('href', next);
+		}
+		// links the page renders later (sliders, tabs) get the code on click
+		document.addEventListener('click', function (e) {
+			var a = e.target && e.target.closest ? e.target.closest('a[href*="checkout"]') : null;
+			if (!a) return;
+			var href = a.getAttribute('href') || '';
+			var next = withCode(href);
+			if (next !== href) a.setAttribute('href', next);
+		}, true);
+	}
+
+	// The footer's native "Bar - Sticky Bottom" carries the offer (props per page). It gets the struck price, a "$50 off"
+	// pill and a subtitle here, and goes away at the deadline with no publish. Its own timer reads a fixed "DD-month" prop
+	// and would roll over to next year, so the bar runs its own countdown, and only for the last week.
+	var BAR_CSS = '.banner-bottom_nmo-pill{flex:none;align-self:center;background:#fff0ea;color:#fc5f2b;border-radius:.375rem;' +
+		'padding:.125rem .45rem;font-family:"Nb International mono pro",monospace;font-size:.75rem;line-height:1.4;' +
+		'letter-spacing:.04em;text-transform:uppercase;white-space:nowrap;position:relative;top:-1px}' +
+		'.banner-bottom_nmo-sub{color:#454545;font-size:.875rem;line-height:1.4}' +
+		'.sp2_banner-bottom[data-sp-nmo-phase="pill"] .banner-bottom_timer-inline{display:none}' +
+		'.sp2_banner-bottom[data-sp-nmo-phase="timer"] .banner-bottom_nmo-pill{display:none}' +
+		'@media (max-width:767px){.banner-bottom_nmo-sub{display:none}}';
+	function prepareNativeBar(deadline) {
+		var timerFrom = Date.parse(OFFER.timerFrom);
+		var bars = document.querySelectorAll('.sp2_banner-bottom');
+		if (bars.length && !document.getElementById('sp-nmo-bar-css')) {
+			var css = document.createElement('style');
+			css.id = 'sp-nmo-bar-css';
+			css.textContent = BAR_CSS;
+			document.head.appendChild(css);
+		}
+		var clocks = [];
+		for (var i = 0; i < bars.length; i++) {
+			var title = bars[i].querySelector('.banner-bottom_title-wrapper');
+			if (!title || title.querySelector('.banner-bottom_price-was')) continue;
+			var was = document.createElement('div');
+			was.className = 'banner-bottom_price-was';
+			was.textContent = OFFER.was;
+			title.insertBefore(was, title.firstChild);
+			var pill = document.createElement('div');
+			pill.className = 'banner-bottom_nmo-pill';
+			pill.textContent = OFFER.barPill;
+			var timerSlot = title.querySelector('.banner-bottom_timer-inline');
+			title.insertBefore(pill, timerSlot);
+			var content = title.parentNode;
+			if (content && !content.querySelector('.banner-bottom_nmo-sub')) {
+				var sub = document.createElement('div');
+				sub.className = 'banner-bottom_nmo-sub';
+				sub.textContent = OFFER.barSub;
+				content.appendChild(sub);
+			}
+			// swap the timer's text node for a copy so the native script (which targets the old node) can't write to it
+			var text = timerSlot && timerSlot.querySelector('.mday-timer_text');
+			if (text) {
+				var own = text.cloneNode(true);
+				own.removeAttribute('data-timer');
+				text.parentNode.replaceChild(own, text);
+				clocks.push(own);
+			}
+		}
+		function pad(n) { return n < 10 ? '0' + n : '' + n; }
+		function tick() {
+			var now = Date.now();
+			var phase = now < timerFrom ? 'pill' : 'timer';
+			for (var b = 0; b < bars.length; b++) {
+				if (bars[b].getAttribute('data-sp-nmo-phase') !== phase) bars[b].setAttribute('data-sp-nmo-phase', phase);
+			}
+			if (phase !== 'timer') return;
+			var s = Math.max(0, Math.floor((deadline - now) / 1000));
+			var label = pad(Math.floor(s / 86400)) + 'D ' + pad(Math.floor(s % 86400 / 3600)) + 'H ' +
+				pad(Math.floor(s % 3600 / 60)) + 'M ' + pad(s % 60) + 'S';
+			for (var c = 0; c < clocks.length; c++) {
+				clocks[c].textContent = label;
+				var wrap = clocks[c].closest('[data-timer-wrapper]');
+				if (wrap && wrap.style.display === 'none') wrap.style.display = '';
+			}
+		}
+		tick();
+		var primeEnd = Date.parse(PRIME.endsAt);
+		var check = setInterval(function () {
+			if (!NMO_ON && Date.now() >= primeEnd) { clearInterval(check); toBase(); return; }
+			if (OFFER.prime && Date.now() >= primeEnd) endPrime();
+			if (Date.now() < deadline) { tick(); return; }
+			clearInterval(check);
+			endOffer();
+		}, 1000);
+	}
+	// After the sale: $199 everywhere, no strike, no pill, no countdown, no discount code.
+	function stripCodes() {
+		var links = document.querySelectorAll('a[href*="code="]');
+		for (var i = 0; i < links.length; i++) {
+			try {
+				var u = new URL(links[i].getAttribute('href'), window.location.href);
+				var code = (u.searchParams.get('code') || '').toUpperCase();
+				if (BASE.codes.indexOf(code) === -1) continue;
+				u.searchParams.delete('code');
+				links[i].setAttribute('href', u.origin === window.location.origin ? u.pathname + u.search + u.hash : u.toString());
+			} catch (e) {}
+		}
+	}
+	function baseText(v, compare) {
+		for (var i = 0; i < BASE.oldPrices.length; i++) {
+			if (compare && BASE.oldPrices[i] === '$349') continue;
+			v = v.replace(priceRe(BASE.oldPrices[i]), function () { return BASE.now; });
+		}
+		for (var j = 0; j < BASE.oldPerDay.length; j++) v = v.split(BASE.oldPerDay[j]).join(BASE.perDay);
+		return v;
+	}
+	function baseBars() {
+		var bars = document.querySelectorAll('.sp2_banner-bottom');
+		if (bars.length && !document.getElementById('sp-base-bar-css')) {
+			var css = document.createElement('style');
+			css.id = 'sp-base-bar-css';
+			css.textContent = '.sp2_banner-bottom[data-sp-base] .banner-bottom_timer-inline,.sp2_banner-bottom[data-sp-base] .banner-bottom_price-was,' +
+				'.sp2_banner-bottom[data-sp-base] .banner-bottom_nmo-pill{display:none!important}' +
+				'.banner-bottom_nmo-sub{color:#454545;font-size:.875rem;line-height:1.4}@media (max-width:767px){.banner-bottom_nmo-sub{display:none}}';
+			document.head.appendChild(css);
+		}
+		for (var i = 0; i < bars.length; i++) {
+			var bar = bars[i];
+			var walker = document.createTreeWalker(bar, NodeFilter.SHOW_TEXT);
+			var node, priced = false;
+			while ((node = walker.nextNode())) {
+				var v = node.nodeValue || '';
+				var next = baseText(v, false);
+				if (next !== v) { node.nodeValue = next; priced = true; }
+				if (next.indexOf(BASE.now) !== -1) priced = true;
+			}
+			if (!priced) continue;
+			bar.setAttribute('data-sp-base', '1');
+			var extra = bar.querySelectorAll('.banner-bottom_price-was, .banner-bottom_nmo-pill');
+			for (var k = 0; k < extra.length; k++) extra[k].parentNode.removeChild(extra[k]);
+			var title = bar.querySelector('.banner-bottom_title-wrapper');
+			var content = title && title.parentNode;
+			var sub = content && content.querySelector('.banner-bottom_nmo-sub');
+			if (content && !sub) {
+				sub = document.createElement('div');
+				sub.className = 'banner-bottom_nmo-sub';
+				content.appendChild(sub);
+			}
+			if (sub) sub.textContent = BASE.barSub;
+		}
+	}
+	function baseCopy() {
+		if (!(markerText() === 'discount' || PRIME.forcePaths.indexOf(currentPath()) !== -1)) return;
+		var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+		var node;
+		while ((node = walker.nextNode())) {
+			var v = node.nodeValue || '';
+			var el = node.parentElement;
+			if (!el || el.closest(SKIP) || el.closest('.sp2_banner-bottom') || struck(el)) continue;
+			var next = baseText(v, COMPARE.test(v));
+			if (next !== v) node.nodeValue = next;
+		}
+	}
+	function basePage() {
+		window.__spNewMemberOffer = null;
+		stripCodes();
+		baseBars();
+		baseCopy();
+		document.addEventListener('click', function (e) {
+			var a = e.target && e.target.closest ? e.target.closest('a[href*="code="]') : null;
+			if (a) stripCodes();
+		}, true);
+	}
+	// Prime Day ends while the page is open and the New Member Offer is off: straight to the base price.
+	function toBase() {
+		restorePage();
+		OFFER = NMO;
+		basePage();
+	}
+	function hideNativeBar() {
+		var bars = document.querySelectorAll('.sp2_banner-bottom');
+		for (var i = 0; i < bars.length; i++) bars[i].style.display = 'none';
+	}
+})();
+</script>

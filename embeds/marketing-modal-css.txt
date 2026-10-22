@@ -1,0 +1,30 @@
+<style>
+/* Modal Marketing — full-screen variant */
+html:has(.sp2-marketing-modal_overlay.is-visible) {
+	scrollbar-width: none;
+}
+.sp2-marketing-modal_overlay.is-visible .sp2-marketing-modal_wrapper {
+	transform: scale(1);
+	opacity: 1;
+}
+.sp2-marketing-modal_close {
+	-webkit-backdrop-filter: blur(8px);
+	backdrop-filter: blur(8px);
+	-webkit-tap-highlight-color: transparent;
+}
+.sp2-marketing-modal_btn {
+	-webkit-tap-highlight-color: transparent;
+}
+.sp2-marketing-modal_content::-webkit-scrollbar {
+	width: 0;
+	height: 0;
+}
+@keyframes sp2BlurOut {
+	0%   { opacity: 1; filter: blur(0); }
+	100% { opacity: 0; filter: blur(12px); }
+}
+@keyframes sp2BlurIn {
+	0%   { opacity: 0; filter: blur(12px); }
+	100% { opacity: 1; filter: blur(0); }
+}
+</style>

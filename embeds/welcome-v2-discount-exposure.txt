@@ -1,0 +1,90 @@
+<style>
+.sp2-ab-marker{position:absolute;left:0;top:0;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none;margin:0;padding:0;line-height:1}
+</style>
+<script>
+(() => {
+  'use strict';
+  /* welcome-v2-discount-modal — Webflow Optimize owns the split; this only reports exposure to PostHog.
+     The arm is read from #sp2AbMarker text: "discount" = test, anything else = control.
+     The Retest/Discount modal JS (Modal Marketing component) reads the same marker. */
+  var EXPERIMENT_KEY = 'welcome-v2-discount-modal';
+  /* v1.1 (2026-09-23): only count a visitor as an arm when Optimize actually rendered the test (it leaves a
+     [data-wf-hidden-variation] copy of the marker). Sessions where the Optimize snippet never ran (affiliate/bot
+     traffic, blockers) were all landing in "control" and dragging its rates down. They now report 'unassigned'. */
+  var MARKER_ID = 'sp2AbMarker';
+  var GRACE_MS = 4000;
+  var sent = false;
+
+  function markerText() {
+    var nodes = document.querySelectorAll('#' + MARKER_ID + ', .sp2-ab-marker');
+    for (var i = 0; i < nodes.length; i++) {
+      /* Optimize renders both variations; the hidden copy does not count */
+      if (nodes[i].closest('[data-wf-hidden-variation]')) continue;
+      return (nodes[i].textContent || '').trim().toLowerCase();
+    }
+    return '';
+  }
+  function optimizeApplied() {
+    return !!document.querySelector('[data-wf-hidden-variation]');
+  }
+  function detectTest() {
+    var qa = null;
+    try { qa = new URLSearchParams(window.location.search).get('sp_offer'); } catch (e) {}
+    if (qa === 'discount') return true;
+    if (qa === 'retest') return false;
+    return markerText() === 'discount';
+  }
+
+  function send(variant) {
+    if (sent) return;
+    sent = true;
+    var ph = window.posthog;
+    if (!ph || !ph.capture) return;
+    var props = { webflow_optimize_experiment_key: EXPERIMENT_KEY, variant: variant };
+    if (variant !== 'unassigned') props['$feature/' + EXPERIMENT_KEY] = variant;
+    ph.capture('webflow_optimize_exposure', props);
+    if (variant !== 'unassigned' && ph.register) {
+      var reg = {};
+      reg['$feature/' + EXPERIMENT_KEY] = variant;
+      ph.register(reg);
+    }
+  }
+
+  function watch() {
+    if (!document.getElementById(MARKER_ID) && !document.querySelector('.sp2-ab-marker')) return;
+    if (detectTest()) { send('discount'); return; }
+    var obs = null;
+    var timer = setTimeout(function () {
+      if (obs) obs.disconnect();
+      var qa = null;
+      try { qa = new URLSearchParams(window.location.search).get('sp_offer'); } catch (e) {}
+      if (detectTest()) { send('discount'); return; }
+      if (qa === 'retest' || optimizeApplied()) { send('control'); return; }
+      send('unassigned');
+    }, GRACE_MS);
+    if (window.MutationObserver) {
+      obs = new MutationObserver(function () {
+        if (detectTest()) { clearTimeout(timer); obs.disconnect(); send('discount'); }
+      });
+      obs.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['data-wf-hidden-variation'] });
+    }
+  }
+
+  function whenPosthog(fn) {
+    if (window.posthog && window.posthog.capture) { fn(); return; }
+    var tries = 0;
+    var t = setInterval(function () {
+      if (window.posthog && window.posthog.capture) { clearInterval(t); fn(); }
+      else if (++tries > 80) clearInterval(t);
+    }, 250);
+  }
+
+  function boot() { whenPosthog(watch); }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
+  } else {
+    boot();
+  }
+})();
+</script>

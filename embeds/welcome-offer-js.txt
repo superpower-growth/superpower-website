@@ -1,0 +1,312 @@
+<script>
+(function() {
+	var container = document.getElementById('sp2StateForm');
+	var btn = document.getElementById('sp2SubmitBtn');
+	var emailField = document.getElementById('sp2EmailInput');
+	var errorEl = document.getElementById('sp2EmailError');
+	var btnDefault = btn.textContent;
+	// editable on #sp2StateForm in the Designer. Must be a real LIST, not a segment: the public
+	// client endpoint rejects segments, and the failure surfaces as a CORS error, not an API error.
+	// Members of V42E4R flow into the "Registered but not paid" segment (TV9Wht) on their own.
+	var listId = container.getAttribute('data-klaviyo-list-id') || 'V42E4R';
+
+	function setLoading(loading) {
+		btn.disabled = loading;
+		btn.textContent = loading ? 'Sending…' : btnDefault;
+		btn.style.opacity = loading ? '0.6' : '';
+		btn.style.cursor = loading ? 'not-allowed' : '';
+	}
+	function showFormError(msg) {
+		emailField.classList.add('has-error');
+		errorEl.textContent = msg;
+		errorEl.classList.add('is-visible');
+	}
+	function hideFormError() {
+		emailField.classList.remove('has-error');
+		errorEl.classList.remove('is-visible');
+	}
+	emailField.addEventListener('input', hideFormError);
+
+	function subscribeEmail(email, searchParams) {
+		return fetch('https://a.klaviyo.com/client/subscriptions/?company_id=XEKaRD', {
+			method: 'POST',
+			headers: {
+				'revision': '2023-08-15',
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({
+				data: {
+					type: 'subscription',
+					attributes: {
+						custom_source: container.getAttribute('data-name'),
+						profile: {
+							data: {
+								type: 'profile',
+								attributes: {
+									email: email,
+									properties: {
+										source_url: window.location.href,
+										source_page_path: window.location.pathname,
+										source_referrer: document.referrer || null,
+										utm_source: searchParams.get('utm_source'),
+										utm_medium: searchParams.get('utm_medium'),
+										utm_campaign: searchParams.get('utm_campaign'),
+										signup_device: /Mobi|Android/i.test(navigator.userAgent) ? 'mobile' : 'desktop'
+									}
+								}
+							}
+						}
+					},
+					relationships: {
+						list: { data: { type: 'list', id: listId } }
+					}
+				}
+			})
+		}).then(function(response) {
+			if (!response.ok) {
+				return response.json().then(function(err) { return Promise.reject(err); });
+			}
+		});
+	}
+
+	function handleSubmit() {
+		hideFormError();
+
+		var email = emailField.value.trim();
+		if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+			showFormError('Please enter a valid email address');
+			emailField.focus();
+			return;
+		}
+
+		setLoading(true);
+
+		var searchParams = new URLSearchParams(window.location.search);
+
+		subscribeEmail(email, searchParams)
+			.then(function() {
+				setLoading(false);
+				if (window.posthog) {
+					posthog.capture('registration_started', {
+						email: email,
+						source: 'welcome_offer_popup',
+						$set: { email: email }
+					});
+				}
+				container.dispatchEvent(new CustomEvent('klaviyo:success'));
+			})
+			.catch(function(err) {
+				console.error('Error sending data to Klaviyo:', err);
+				setLoading(false);
+				showFormError('Something went wrong. Please try again.');
+			});
+	}
+
+	btn.addEventListener('click', handleSubmit);
+	emailField.addEventListener('keydown', function(e) {
+		if (e.key === 'Enter') { e.preventDefault(); handleSubmit(); }
+	});
+})();
+</script>
+
+<script>
+(function () {
+	'use strict';
+	var SESSION_KEY = 'sp_welcome_offer_v2';
+	var SUPPRESS_WINDOW = 24 * 60 * 60 * 1000;
+	var BEFORE_YOU_GO_KEY = 'sp_before_you_go';
+	var LOCK_ATTR = 'data-sp-modal-lock';
+	var SCROLL_TRIGGER = 0.3;
+	var BLOCKING_SELECTOR = '.byg-overlay.is-visible, [data-byg="overlay"].is-visible, [data-byg="overlay-giannis"].is-visible, .sp3-buybox_modal.is-open';
+	// deliberately generous: the stray sweep must never clear a lock another component still owns
+	var LOCK_OWNER_SELECTOR = BLOCKING_SELECTOR + ', .sp2-marketing-modal_overlay.is-visible, [class*="overlay"].is-visible, [class*="modal"].is-open, [class*="overlay"].is-open';
+
+	var overlay = document.getElementById('sp2Overlay');
+	var closeBtn = document.getElementById('sp2Close');
+	var emailInput = document.getElementById('sp2EmailInput');
+	var emailError = document.getElementById('sp2EmailError');
+	var stateForm = document.getElementById('sp2StateForm');
+	var stateSuccess = document.getElementById('sp2StateSuccess');
+	if (!overlay || !closeBtn || !stateForm || !stateSuccess) return;
+
+	var hasBeenShown = false;
+	var hasSubmitted = false;
+	// iOS: programmatic focus inside a fixed overlay scroll-jumps the locked page; only autofocus fine pointers
+	var finePointer = false;
+	try { finePointer = window.matchMedia('(hover: hover) and (pointer: fine)').matches; } catch (e) {}
+
+	// localStorage timestamp is the real gate; sessionStorage is the backstop for private and
+	// in-app browsers where localStorage throws or is wiped
+	function recentlyShown() {
+		try {
+			var t = parseInt(localStorage.getItem(SESSION_KEY), 10);
+			if (t > 0 && Date.now() - t < SUPPRESS_WINDOW) return true;
+		} catch (e) {}
+		try { if (sessionStorage.getItem(SESSION_KEY) === '1') return true; } catch (e) {}
+		return false;
+	}
+	function markShown() {
+		try { localStorage.setItem(SESSION_KEY, String(Date.now())); } catch (e) {}
+		try { sessionStorage.setItem(SESSION_KEY, '1'); } catch (e) {}
+	}
+	function beforeYouGoShownThisSession() {
+		try { return sessionStorage.getItem(BEFORE_YOU_GO_KEY) === '1'; } catch (e) { return false; }
+	}
+	function track(name, extra) {
+		if (!window.posthog) return;
+		var props = {
+			source: 'welcome_offer_popup',
+			modal_name: stateForm.getAttribute('data-name') || '',
+			list_id: stateForm.getAttribute('data-klaviyo-list-id') || ''
+		};
+		if (extra) { for (var k in extra) props[k] = extra[k]; }
+		try { posthog.capture(name, props); } catch (e) {}
+	}
+	function blockingModalOpen() {
+		try { return !!document.querySelector(BLOCKING_SELECTOR); } catch (e) { return false; }
+	}
+	function someoneOwnsLock() {
+		try {
+			if (window.__scrollLocked === true) return true;
+			return !!document.querySelector(LOCK_OWNER_SELECTOR);
+		} catch (e) { return true; }
+	}
+
+	function lockScroll() {
+		var de = document.documentElement;
+		if (de.getAttribute(LOCK_ATTR) === '1') return;
+		de.setAttribute(LOCK_ATTR, '1');
+		de.style.overflow = 'hidden';
+		if (document.body) document.body.style.overflow = 'hidden';
+	}
+	function unlockScroll() {
+		var de = document.documentElement;
+		if (de.getAttribute(LOCK_ATTR) !== '1') return;
+		de.removeAttribute(LOCK_ATTR);
+		de.style.overflow = '';
+		if (document.body) document.body.style.overflow = '';
+	}
+	// self-heals both ways: re-locks after a bfcache restore, releases if the modal went away
+	function auditLock() {
+		if (overlay.classList.contains('is-visible')) { lockScroll(); return; }
+		if (document.documentElement.getAttribute(LOCK_ATTR) === '1') unlockScroll();
+	}
+
+	function show() {
+		if (hasBeenShown) return;
+		if (beforeYouGoShownThisSession()) return;
+		if (blockingModalOpen()) return;
+		hasBeenShown = true;
+		markShown();
+		overlay.classList.add('is-visible');
+		lockScroll();
+		track('marketing_modal_shown', { trigger: 'scroll_depth', scroll_depth: Math.round(scrollDepth() * 100) });
+		if (finePointer) { try { emailInput.focus(); } catch (e) {} }
+	}
+	function hide() {
+		var wasVisible = overlay.classList.contains('is-visible');
+		overlay.classList.remove('is-visible');
+		unlockScroll();
+		if (wasVisible) track('marketing_modal_dismissed', { submitted: hasSubmitted });
+	}
+	function transitionToSuccess() {
+		stateForm.classList.add('is-exiting');
+		stateForm.addEventListener('animationend', function handler() {
+			stateForm.removeEventListener('animationend', handler);
+			stateForm.classList.remove('is-active', 'is-exiting');
+			stateSuccess.classList.add('is-active', 'is-entering');
+			stateSuccess.addEventListener('animationend', function h2() {
+				stateSuccess.removeEventListener('animationend', h2);
+				stateSuccess.classList.remove('is-entering');
+			});
+		});
+	}
+	closeBtn.addEventListener('click', hide);
+	overlay.addEventListener('click', function (e) {
+		if (e.target === overlay) hide();
+	});
+	document.addEventListener('keydown', function (e) {
+		if (e.key === 'Escape' && overlay.classList.contains('is-visible')) hide();
+	});
+	stateForm.addEventListener('klaviyo:success', function () {
+		hasSubmitted = true;
+		transitionToSuccess();
+	});
+
+	function scrollDepth() {
+		var de = document.documentElement;
+		var docH = Math.max(de.scrollHeight || 0, document.body ? document.body.scrollHeight || 0 : 0);
+		var vh = window.innerHeight || de.clientHeight || 0;
+		if (!docH || !vh || docH - vh < 100) return 0;
+		return ((window.pageYOffset || de.scrollTop || 0) + vh) / docH;
+	}
+	var ticking = false;
+	function onScroll() {
+		if (ticking) return;
+		ticking = true;
+		requestAnimationFrame(function () {
+			ticking = false;
+			if (hasBeenShown) { detachScroll(); return; }
+			if (scrollDepth() >= SCROLL_TRIGGER) { detachScroll(); show(); }
+		});
+	}
+	function detachScroll() {
+		window.removeEventListener('scroll', onScroll);
+	}
+
+	function forceShow() {
+		overlay.classList.add('is-visible');
+		lockScroll();
+		stateForm.classList.remove('is-exiting');
+		stateForm.classList.add('is-active');
+		stateSuccess.classList.remove('is-active', 'is-entering');
+		emailInput.classList.remove('has-error');
+		emailError.classList.remove('is-visible');
+		emailInput.value = '';
+		if (finePointer) { try { emailInput.focus(); } catch (e) {} }
+	}
+	function forceSuccess() {
+		overlay.classList.add('is-visible');
+		lockScroll();
+		if (stateForm.classList.contains('is-active')) {
+			transitionToSuccess();
+		} else {
+			stateForm.classList.remove('is-active', 'is-exiting');
+			stateSuccess.classList.add('is-active');
+			stateSuccess.classList.remove('is-entering');
+		}
+	}
+	function reset() {
+		try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+		try { sessionStorage.removeItem(SESSION_KEY); } catch (e) {}
+		hasBeenShown = false;
+		hide();
+		window.addEventListener('scroll', onScroll, { passive: true });
+	}
+	window.__spModal = { show: forceShow, hide: hide, showSuccess: forceSuccess, reset: reset, depth: scrollDepth };
+
+	window.addEventListener('pageshow', auditLock);
+	window.addEventListener('popstate', auditLock);
+	document.addEventListener('visibilitychange', auditLock);
+	window.addEventListener('focus', auditLock);
+	setInterval(auditLock, 1000);
+	auditLock();
+
+	// safety net for the other modals on this site, which lock scroll without our attribute
+	var strayChecks = 0;
+	var strayWatch = setInterval(function () {
+		strayChecks++;
+		if (strayChecks > 120) { clearInterval(strayWatch); return; }
+		var de = document.documentElement;
+		if (de.getAttribute(LOCK_ATTR) === '1') return;
+		if (de.style.overflow === 'hidden' && !someoneOwnsLock()) {
+			de.style.overflow = '';
+			if (document.body) document.body.style.overflow = '';
+		}
+	}, 1000);
+
+	if (recentlyShown()) return;
+	if (beforeYouGoShownThisSession()) return;
+	window.addEventListener('scroll', onScroll, { passive: true });
+})();
+</script>

@@ -1,0 +1,333 @@
+<script>
+(function () {
+		'use strict';
+		// CONFIG
+		var STORAGE_KEY = 'sp_before_you_go';
+		var KLAVIYO_COMPANY_ID = 'XEKaRD';
+		var KLAVIYO_LIST_ID = 'TNhvN9';
+		var SCROLL_UP_VELOCITY = 10;
+		// SELECTORS — all via data attributes
+		var q = function (name, root) { return (root || document).querySelector('[data-byg="' + name + '"]'); };
+		var qs = function (name, root) { return (root || document).querySelectorAll('[data-byg="' + name + '"]'); };
+		var overlay = q('overlay');
+		var closeBtn = q('close');
+		var container = q('box');
+		var viewport = q('viewport');
+		var track = q('track');
+		var optionProtocol = q('option-protocol');
+		var backBtn = q('back');
+		var emailInput = q('email-input');
+		var emailError = q('email-error');
+		var submitBtn = q('submit');
+		var continueBtn = q('continue');
+		var slides = {};
+		document.querySelectorAll('[data-byg-slide]').forEach(function (el) {
+				slides[el.getAttribute('data-byg-slide')] = el;
+		});
+		var submitBtnDefault = submitBtn ? submitBtn.textContent : 'Continue for free';
+		var hasBeenShown = false;
+		var transitioning = false;
+		var currentState = 'initial';
+		// arm exit-intent triggers only after the Intellimize anti-flicker window clears and 5s dwell,
+		// so the modal can never open (and lock scroll) while the page is still render-hidden
+		var armed = false;
+		var bootT = Date.now();
+		(function checkArm() {
+			if (armed) return;
+			if (Date.now() - bootT >= 5000 && !document.documentElement.classList.contains('anti-flicker')) { armed = true; return; }
+			setTimeout(checkArm, 500);
+		})();
+		// EXPOSE EARLY STUB
+		function noop() {}
+		window.__sp3Modal = window.__sp3Modal || { show: noop, showEmail: noop, showSuccess: noop, hide: noop, reset: noop };
+		if (!overlay || !track || !viewport || !slides.initial || !slides.email || !slides.success) {
+			console.warn('[byg] Required elements missing, modal disabled');
+			return;
+		}
+		// IMAGE PREP — force eager loading + preload so the image is ready before the modal appears
+		(function preloadModalImages() {
+			try {
+				var imgs = overlay.querySelectorAll('img[loading="lazy"], img');
+				imgs.forEach(function (img) {
+					if (img.getAttribute('loading') === 'lazy') img.setAttribute('loading', 'eager');
+					img.decoding = 'async';
+					if (img.fetchPriority !== undefined) img.fetchPriority = 'high';
+					if (img.src) {
+						var pre = new Image();
+						if (img.srcset) pre.srcset = img.srcset;
+						if (img.sizes) pre.sizes = img.sizes;
+						pre.src = img.src;
+					}
+				});
+			} catch (e) { /* noop */ }
+		})();
+		// STORAGE
+		function alreadyShown() { try { return localStorage.getItem(STORAGE_KEY) === '1'; } catch (e) { return false; } }
+		function shownThisSession() { try { return sessionStorage.getItem(STORAGE_KEY) === '1'; } catch (e) { return false; } }
+		function markShown() { try { localStorage.setItem(STORAGE_KEY, '1'); sessionStorage.setItem(STORAGE_KEY, '1'); } catch (e) {} }
+		function otherModalOpen() {
+			try { return document.querySelectorAll('.sp2-marketing-modal_overlay.is-visible, [data-byg="overlay-giannis"].is-visible').length > 0; }
+			catch (e) { return false; }
+		}
+		// HEIGHT MEASURE
+		function measureHeight(slideEl) {
+			var origStyle = slideEl.getAttribute('style') || '';
+			slideEl.style.cssText = origStyle + ';opacity:0;pointer-events:none;display:block;position:relative;';
+			var h = slideEl.offsetHeight;
+			slideEl.setAttribute('style', origStyle);
+			return h;
+		}
+		function updateViewportHeight(stateName) {
+			viewport.style.height = measureHeight(slides[stateName]) + 'px';
+		}
+		// STATE CLASS HELPERS
+		function setTrackState(name) {
+			track.classList.remove('is-state-initial', 'is-state-email', 'is-state-success');
+			track.classList.add('is-state-' + name);
+		}
+		function setActiveSlide(name) {
+			Object.keys(slides).forEach(function (k) {
+					slides[k].classList.toggle('is-inactive', k !== name);
+			});
+		}
+		// SHOW / HIDE
+		function show() {
+			if (hasBeenShown || otherModalOpen() || shownThisSession()) return;
+			hasBeenShown = true;
+			markShown();
+			track.style.transition = 'none';
+			viewport.style.transition = 'none';
+			setActiveSlide('initial');
+			setTrackState('initial');
+			currentState = 'initial';
+			emailInput.value = '';
+			hideEmailError();
+			updateViewportHeight('initial');
+			overlay.classList.add('is-visible');
+			overlay.setAttribute('aria-hidden', 'false');
+			document.documentElement.style.overflow = 'hidden';
+			viewport.offsetHeight;
+			track.style.transition = '';
+			viewport.style.transition = '';
+		}
+		function hide() {
+			if (!overlay.classList.contains('is-visible')) return;
+			overlay.classList.remove('is-visible');
+			overlay.classList.add('is-closing');
+			overlay.setAttribute('aria-hidden', 'true');
+			document.documentElement.style.overflow = '';
+			var done = false;
+			function finish() {
+				if (done) return; done = true;
+				overlay.classList.remove('is-closing');
+			}
+			var wrap = overlay.querySelector('.byg-wrap');
+			if (wrap) wrap.addEventListener('animationend', finish, { once: true });
+			setTimeout(finish, 450);
+		}
+		// STATE NAVIGATION — slide + blur + fade
+		function goToState(targetName) {
+			if (transitioning) return;
+			if (currentState === targetName) return;
+			transitioning = true;
+			viewport.style.height = viewport.offsetHeight + 'px';
+			var targetHeight = measureHeight(slides[targetName]);
+			track.classList.add('is-sliding');
+			requestAnimationFrame(function () {
+					setActiveSlide(targetName);
+					setTrackState(targetName);
+					viewport.style.height = targetHeight + 'px';
+			});
+			setTimeout(function () {
+					track.classList.remove('is-sliding');
+				}, 150);
+			setTimeout(function () {
+					currentState = targetName;
+					transitioning = false;
+				}, 500);
+		}
+		// EMAIL
+		function setLoading(loading) {
+			submitBtn.disabled = loading;
+			submitBtn.textContent = loading ? 'Sending…' : submitBtnDefault;
+			submitBtn.style.opacity = loading ? '0.6' : '';
+			submitBtn.style.cursor = loading ? 'not-allowed' : '';
+		}
+		function showEmailError(msg) {
+			emailInput.classList.add('has-error');
+			emailError.textContent = msg;
+			emailError.classList.add('is-visible');
+			if (currentState === 'email') updateViewportHeight('email');
+		}
+		function hideEmailError() {
+			emailInput.classList.remove('has-error');
+			emailError.classList.remove('is-visible');
+		}
+		emailInput.addEventListener('input', hideEmailError);
+		function subscribeEmail(email) {
+			var searchParams = new URLSearchParams(window.location.search);
+			return fetch('https://a.klaviyo.com/client/subscriptions/?company_id=' + KLAVIYO_COMPANY_ID, {
+					method: 'POST',
+					headers: { 'revision': '2023-08-15', 'content-type': 'application/json' },
+					body: JSON.stringify({
+							data: {
+								type: 'subscription',
+								attributes: {
+									custom_source: container.getAttribute('data-name'),
+									profile: { data: { type: 'profile', attributes: {
+												email: email,
+												properties: {
+													source_url: window.location.href,
+													source_page_path: window.location.pathname,
+													source_referrer: document.referrer || null,
+													utm_source: searchParams.get('utm_source'),
+													utm_medium: searchParams.get('utm_medium'),
+													utm_campaign: searchParams.get('utm_campaign'),
+													signup_device: /Mobi|Android/i.test(navigator.userAgent) ? 'mobile' : 'desktop',
+													modal_type: 'before_you_go',
+													modal_option: 'free_health_protocol'
+												}
+									} } }
+								},
+								relationships: { list: { data: { type: 'list', id: KLAVIYO_LIST_ID } } }
+							}
+					})
+			}).then(function (response) {
+					if (!response.ok && response.status !== 409) {
+						return response.json().then(function (err) { return Promise.reject(err); });
+					}
+			});
+		}
+		function handleSubmit() {
+			hideEmailError();
+			var email = emailInput.value.trim();
+			if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+				showEmailError('Please enter a valid email address');
+				emailInput.focus();
+				return;
+			}
+			setLoading(true);
+			subscribeEmail(email)
+			.then(function () {
+					setLoading(false);
+					if (window.posthog) {
+						posthog.capture('registration_started', {
+								email: email,
+								source: 'before_you_go_popup',
+								modal_option: 'free_health_protocol',
+								$set: { email: email }
+						});
+					}
+					goToState('success');
+			})
+			.catch(function (err) {
+					console.error('Klaviyo error:', err);
+					setLoading(false);
+					showEmailError('Something went wrong. Please try again.');
+			});
+		}
+		// EVENTS
+		optionProtocol.addEventListener('click', function (e) {
+				e.preventDefault();
+				goToState('email');
+				setTimeout(function () { try { emailInput.focus(); } catch(e){} }, 450);
+		});
+		backBtn.addEventListener('click', function () {
+				hideEmailError();
+				emailInput.value = '';
+				goToState('initial');
+		});
+		submitBtn.addEventListener('click', handleSubmit);
+		emailInput.addEventListener('keydown', function (e) {
+				if (e.key === 'Enter') { e.preventDefault(); handleSubmit(); }
+		});
+		continueBtn.addEventListener('click', hide);
+		closeBtn.addEventListener('click', hide);
+		overlay.addEventListener('click', function (e) {
+				if (e.target === overlay) hide();
+		});
+		document.addEventListener('keydown', function (e) {
+				if (e.key === 'Escape' && overlay.classList.contains('is-visible')) hide();
+		});
+		// EXIT INTENT
+		var isDesktop = false;
+		try { isDesktop = window.matchMedia('(hover: hover) and (pointer: fine)').matches; } catch (e) {}
+		if (isDesktop) {
+			document.addEventListener('mouseout', function handler(e) {
+					if (armed && e.clientY <= 0 && !e.relatedTarget && !hasBeenShown) {
+						show();
+						document.removeEventListener('mouseout', handler);
+					}
+			});
+		}
+		if (!isDesktop) {
+			var lastY = window.pageYOffset;
+			var lastT = Date.now();
+			function onScroll() {
+				if (hasBeenShown) { window.removeEventListener('scroll', onScroll); return; }
+				var y = window.pageYOffset, t = Date.now();
+				var dy = lastY - y, dt = t - lastT;
+				if (armed && dy > SCROLL_UP_VELOCITY && dt < 100 && y < lastY && lastY > 200) {
+					show();
+					window.removeEventListener('scroll', onScroll);
+				}
+				lastY = y; lastT = t;
+			}
+			window.addEventListener('scroll', onScroll, { passive: true });
+		}
+		// Back button intercept
+		try {
+			history.pushState({ byg: true }, '', window.location.href);
+			window.addEventListener('popstate', function () {
+					if (!armed || hasBeenShown || otherModalOpen() || shownThisSession()) return;
+					show();
+					try { history.pushState({ byg: true }, '', window.location.href); } catch (e) {}
+			});
+		} catch (e) {
+			console.warn('[byg] history.pushState unavailable');
+		}
+		// Resize
+		var resizeTimer;
+		window.addEventListener('resize', function () {
+				if (!overlay.classList.contains('is-visible')) return;
+				clearTimeout(resizeTimer);
+				resizeTimer = setTimeout(function () {
+						if (!transitioning) {
+							viewport.style.transition = 'none';
+							updateViewportHeight(currentState);
+							viewport.offsetHeight;
+							viewport.style.transition = '';
+						}
+					}, 150);
+		});
+		// PUBLIC API
+		function forceShow() { hasBeenShown = false; show(); }
+		function jumpTo(name) {
+			forceShow();
+			setTimeout(function () {
+					track.style.transition = 'none';
+					viewport.style.transition = 'none';
+					setActiveSlide(name);
+					setTrackState(name);
+					currentState = name;
+					updateViewportHeight(name);
+					viewport.offsetHeight;
+					track.style.transition = '';
+					viewport.style.transition = '';
+				}, 100);
+		}
+		window.__sp3Modal = {
+			show: forceShow,
+			showEmail: function () { jumpTo('email'); },
+			showSuccess: function () { jumpTo('success'); },
+			hide: hide,
+			reset: function () {
+				try { localStorage.removeItem(STORAGE_KEY); sessionStorage.removeItem(STORAGE_KEY); } catch (e) {}
+				hasBeenShown = false;
+				hide();
+			}
+		};
+		// Boot-time gate: respect both localStorage (forever) and sessionStorage (this session, set by sp4)
+		if (alreadyShown() || shownThisSession()) hasBeenShown = true;
+})();
+</script>
