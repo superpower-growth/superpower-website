@@ -12,7 +12,7 @@
 #sp2Overlay.is-img-nurse [data-sp-modal-img="silhouette"] { display: none !important; }
 </style>
 <script>
-/* Modal v3.4 (2026-10-17): FOLLOWUP code (Promo, 100% off Progress Check Panel, auto-added) on checkout links once the modal is claimed. v3.3: image A/B silhouette vs nurse (Alex, Figma comment). v3.2: copy lives in the Designer HTML, script only runs behavior. v3.0: always-on "free follow-up test" offer for the $199 SKU (CRO thread, Connor + Alex: old retest SKU, $99 value).
+/* Modal v3.5 (2026-10-22): landing-page ?code= passthrough (creator links like /lp/pdp-v3?code=X, Ryan), wins over FOLLOWUP. v3.4: FOLLOWUP code (Promo, 100% off Progress Check Panel, auto-added) on checkout links once the modal is claimed. v3.3: image A/B silhouette vs nurse (Alex, Figma comment). v3.2: copy lives in the Designer HTML, script only runs behavior. v3.0: always-on "free follow-up test" offer for the $199 SKU (CRO thread, Connor + Alex: old retest SKU, $99 value).
    The $50 off arm is retired: every page gets the follow-up offer, whatever #sp2AbMarker or Optimize say. */
 (function () {
 	'use strict';
@@ -48,27 +48,47 @@
 		return v;
 	}
 	var IMAGE_VARIANT = imageArm();
-	// Claimed visitors keep the free follow-up test: add code=FOLLOWUP to checkout links that carry no code yet
-	// (the modal CTA routes to the page's buy box first, so the code has to live on every checkout link). Partner codes are never replaced.
+	// Checkout code for this visitor: a ?code= the visitor landed with (creator/partner links) wins, kept 7 days;
+	// otherwise FOLLOWUP once they claimed the modal. Links that already carry a code are never changed.
+	var LANDING_KEY = 'sp_landing_code';
+	var LANDING_TTL = 7 * 24 * 60 * 60 * 1000;
 	function claimed() { try { return localStorage.getItem(CLAIM_KEY) === '1'; } catch (e) { return false; } }
-	function withFollowupCode(href) {
+	function landingCode() {
+		var c = null;
+		try { c = new URLSearchParams(window.location.search).get('code'); } catch (e) {}
+		if (c && /^[A-Za-z0-9_-]{2,40}$/.test(c)) {
+			c = c.toUpperCase();
+			try { localStorage.setItem(LANDING_KEY, JSON.stringify({ code: c, t: Date.now() })); } catch (e) {}
+			return c;
+		}
+		try {
+			var o = JSON.parse(localStorage.getItem(LANDING_KEY) || 'null');
+			if (o && o.code && Date.now() - o.t < LANDING_TTL) return o.code;
+		} catch (e) {}
+		return null;
+	}
+	var LANDING_CODE = landingCode();
+	function visitorCode() { return LANDING_CODE || (claimed() ? FOLLOWUP_CODE : null); }
+	function withVisitorCode(href) {
+		var code = visitorCode();
+		if (!code) return null;
 		var u;
 		try { u = new URL(href, window.location.href); } catch (e) { return null; }
 		if (!/(^|\.)superpower\.com$/.test(u.hostname) && u.hostname !== window.location.hostname) return null;
 		if (!/^\/checkout(\/|$)/.test(u.pathname) || u.searchParams.has('code')) return null;
-		u.searchParams.set('code', FOLLOWUP_CODE);
+		u.searchParams.set('code', code);
 		return u.toString();
 	}
 	function decorateCheckoutLinks() {
-		if (!claimed()) return;
+		if (!visitorCode()) return;
 		var links = document.querySelectorAll('a[href*="checkout"]');
-		for (var i = 0; i < links.length; i++) { var h = withFollowupCode(links[i].getAttribute('href')); if (h) links[i].setAttribute('href', h); }
+		for (var i = 0; i < links.length; i++) { var h = withVisitorCode(links[i].getAttribute('href')); if (h) links[i].setAttribute('href', h); }
 	}
 	document.addEventListener('click', function (e) {
-		if (!claimed()) return;
+		if (!visitorCode()) return;
 		var a = e.target && e.target.closest ? e.target.closest('a[href*="checkout"]') : null;
 		if (!a) return;
-		var h = withFollowupCode(a.getAttribute('href'));
+		var h = withVisitorCode(a.getAttribute('href'));
 		if (h) a.setAttribute('href', h);
 	}, true);
 	if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', decorateCheckoutLinks); else decorateCheckoutLinks();
@@ -166,7 +186,7 @@
 		return currentOffer;
 	}
 	function isDiscount() { return currentOffer === OFFER_DISCOUNT; }
-	function checkoutHref() { return FOLLOWUP_CODE ? CHECKOUT_URL + '?code=' + FOLLOWUP_CODE : CHECKOUT_URL; }
+	function checkoutHref() { var c = LANDING_CODE || FOLLOWUP_CODE; return c ? CHECKOUT_URL + '?code=' + c : CHECKOUT_URL; }
 	// UTM: the sitewide utmPassthrough script decorates the anchor on click (capture phase) with the visitor's
 	// acquisition params. We never overwrite those; we only add modal attribution where nothing is set.
 	function withModalUtm(href) {
